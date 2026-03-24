@@ -135,6 +135,12 @@ export interface SquadSessionConfig {
    * When enabled (default), sessions automatically manage context limits.
    */
   infiniteSessions?: SquadInfiniteSessionConfig;
+
+  /**
+   * Skip the Codex SDK Git repository check for this session.
+   * When omitted, Squad defaults this to true for Codex-backed sessions.
+   */
+  skipGitRepoCheck?: boolean;
 }
 
 // ============================================================================
@@ -749,6 +755,13 @@ export interface SquadInfiniteSessionConfig {
  * Valid reasoning effort levels for models that support it.
  */
 export type SquadReasoningEffort = "low" | "medium" | "high" | "xhigh";
+
+/**
+ * Agent SDK selection.
+ * - "copilot": GitHub Copilot SDK-backed sessions
+ * - "codex": OpenAI Codex SDK-backed threads
+ */
+export type SquadAgentSdk = "copilot" | "codex";
 
 // ============================================================================
 // Session Interface

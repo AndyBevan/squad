@@ -13,6 +13,9 @@ import { recordSessionCreated, recordSessionClosed, recordSessionError, recordTo
 import { estimateCost } from '../config/models.js';
 import type { EventBus } from '../runtime/event-bus.js';
 import type { UsageEvent } from '../runtime/streaming.js';
+import { SquadAgentClientFactory } from './agent-client-factory.js';
+import { createCodexClient } from './codex-client.js';
+import type { AgentClient, AgentClientFactoryOptions } from './agent-client-types.js';
 import type { 
   SquadSessionConfig, 
   SquadSession,
@@ -24,6 +27,7 @@ import type {
   SquadGetStatusResponse,
   SquadModelInfo,
   SquadMessageOptions,
+  SquadAgentSdk,
   SquadClientEventType,
   SquadClientEvent,
   SquadClientEventHandler,
@@ -140,6 +144,84 @@ class CopilotSessionAdapter implements SquadSession {
   }
 }
 
+function createCopilotClient(options: AgentClientFactoryOptions): AgentClient {
+  const copilotClient = new CopilotClient({
+    cliPath: options.cliPath,
+    cliArgs: options.cliArgs,
+    cwd: options.cwd,
+    port: options.port,
+    useStdio: options.useStdio,
+    cliUrl: options.cliUrl,
+    logLevel: options.logLevel,
+    autoStart: false, // We manage connection lifecycle.
+    autoRestart: false, // We handle reconnection ourselves.
+    env: options.env,
+    githubToken: options.githubToken,
+    useLoggedInUser: options.useLoggedInUser,
+  });
+
+  return {
+    start: () => copilotClient.start(),
+    stop: () => copilotClient.stop(),
+    forceStop: () => copilotClient.forceStop(),
+    createSession: async (config) => new CopilotSessionAdapter(
+      await copilotClient.createSession(config as Parameters<typeof copilotClient.createSession>[0]),
+    ),
+    resumeSession: async (sessionId, config) => new CopilotSessionAdapter(
+      await copilotClient.resumeSession(sessionId, config as Parameters<typeof copilotClient.resumeSession>[1]),
+    ),
+    listSessions: async () => {
+      const sessions = await copilotClient.listSessions();
+      return sessions.map((session) => ({
+        sessionId: session.sessionId,
+        startTime: session.startTime,
+        modifiedTime: session.modifiedTime,
+        summary: session.summary,
+        isRemote: session.isRemote,
+        context: session.context as Record<string, unknown> | undefined,
+      }));
+    },
+    deleteSession: (sessionId) => copilotClient.deleteSession(sessionId),
+    getLastSessionId: () => copilotClient.getLastSessionId(),
+    ping: (message) => copilotClient.ping(message),
+    getStatus: async () => {
+      const raw = await copilotClient.getStatus();
+      return { version: raw.version, protocolVersion: raw.protocolVersion };
+    },
+    getAuthStatus: async () => {
+      const raw = await copilotClient.getAuthStatus();
+      return {
+        isAuthenticated: raw.isAuthenticated,
+        authType: raw.authType,
+        host: raw.host,
+        login: raw.login,
+        statusMessage: raw.statusMessage,
+      };
+    },
+    listModels: async () => {
+      const models = await copilotClient.listModels();
+      return models.map((m): SquadModelInfo => ({
+        id: m.id,
+        name: m.name,
+        capabilities: m.capabilities,
+        policy: m.policy,
+        billing: m.billing,
+        supportedReasoningEfforts: m.supportedReasoningEfforts,
+        defaultReasoningEffort: m.defaultReasoningEffort,
+      }));
+    },
+    on: (
+      eventTypeOrHandler: SquadClientEventType | SquadClientEventHandler,
+      handler?: (event: SquadClientEvent) => void,
+    ) => {
+      if (typeof eventTypeOrHandler === 'string' && handler) {
+        return copilotClient.on(eventTypeOrHandler, handler);
+      }
+      return copilotClient.on(eventTypeOrHandler as SquadClientEventHandler);
+    },
+  };
+}
+
 /**
  * Connection state for SquadClient.
  */
@@ -149,6 +231,12 @@ export type SquadConnectionState = "disconnected" | "connecting" | "connected" |
  * Options for creating a SquadClient.
  */
 export interface SquadClientOptions {
+  /**
+   * Agent SDK to use for agent sessions.
+   * @default "copilot"
+   */
+  agentSdk?: SquadAgentSdk;
+
   /**
    * Path to the Copilot CLI executable.
    * Defaults to bundled CLI from @github/copilot package.
@@ -264,18 +352,19 @@ export interface SquadClientOptions {
  * ```
  */
 export class SquadClient {
-  private client: CopilotClient;
+  private client: AgentClient;
   private state: SquadConnectionState = "disconnected";
   private connectPromise: Promise<void> | null = null;
   private reconnectAttempts: number = 0;
   private reconnectTimer: NodeJS.Timeout | null = null;
-  private options: Required<Omit<SquadClientOptions, "cliUrl" | "githubToken" | "useLoggedInUser" | "cliPath" | "cliArgs" | "eventBus">> & {
+  private options: Required<Omit<SquadClientOptions, "cliUrl" | "githubToken" | "useLoggedInUser" | "cliPath" | "cliArgs" | "eventBus" | "agentSdk">> & {
     cliUrl?: string;
     githubToken?: string;
     useLoggedInUser?: boolean;
     cliPath?: string;
     cliArgs: string[];
     eventBus?: EventBus;
+    agentSdk: SquadAgentSdk;
   };
   private manualDisconnect: boolean = false;
 
@@ -302,9 +391,11 @@ export class SquadClient {
       maxReconnectAttempts: options.maxReconnectAttempts ?? 3,
       reconnectDelayMs: options.reconnectDelayMs ?? 1000,
       eventBus: options.eventBus,
+      agentSdk: options.agentSdk ?? 'copilot',
     };
 
-    this.client = new CopilotClient({
+    this.client = SquadAgentClientFactory.create({
+      agentSdk: this.options.agentSdk,
       cliPath: this.options.cliPath,
       cliArgs: this.options.cliArgs,
       cwd: this.options.cwd,
@@ -312,11 +403,12 @@ export class SquadClient {
       useStdio: this.options.useStdio,
       cliUrl: this.options.cliUrl,
       logLevel: this.options.logLevel,
-      autoStart: false, // We manage connection lifecycle
-      autoRestart: false, // We handle reconnection ourselves
       env: this.options.env,
       githubToken: this.options.githubToken,
       useLoggedInUser: this.options.useLoggedInUser,
+    }, {
+      createCopilotClient,
+      createCodexClient,
     });
   }
 
@@ -335,7 +427,7 @@ export class SquadClient {
   }
 
   /**
-   * Establish connection to the Copilot CLI server.
+   * Establish connection to the configured agent SDK runtime.
    * 
    * This method:
    * 1. Spawns or connects to the CLI server
@@ -356,7 +448,10 @@ export class SquadClient {
     }
 
     const span = tracer.startSpan('squad.client.connect');
-    span.setAttribute('connection.transport', this.options.useStdio ? 'stdio' : 'tcp');
+    span.setAttribute('connection.transport', this.options.agentSdk === 'codex'
+      ? 'stdio'
+      : (this.options.useStdio ? 'stdio' : 'tcp'));
+    span.setAttribute('agent_sdk', this.options.agentSdk);
 
     this.state = "connecting";
     this.manualDisconnect = false;
@@ -379,7 +474,7 @@ export class SquadClient {
       } catch (error) {
         this.state = "error";
         const wrapped = new Error(
-          `Failed to connect to Copilot CLI: ${error instanceof Error ? error.message : String(error)}`
+          `Failed to connect to ${this.options.agentSdk}: ${error instanceof Error ? error.message : String(error)}`
         );
         span.setStatus({ code: SpanStatusCode.ERROR, message: wrapped.message });
         span.recordException(wrapped);
@@ -394,7 +489,7 @@ export class SquadClient {
   }
 
   /**
-   * Disconnect from the Copilot CLI server.
+   * Disconnect from the configured agent SDK runtime.
    * 
    * Performs graceful cleanup:
    * 1. Destroys all active sessions
@@ -468,19 +563,17 @@ export class SquadClient {
       }
 
       try {
-        // Cast config to handle SDK version differences in SessionConfig type
-        const session = await this.client.createSession(config as Parameters<typeof this.client.createSession>[0]);
-        const result = new CopilotSessionAdapter(session);
-        if (result.sessionId) {
-          span.setAttribute('session.id', result.sessionId);
+        const session = await this.client.createSession(config);
+        if (session.sessionId) {
+          span.setAttribute('session.id', session.sessionId);
         }
         recordSessionCreated();
 
         // Auto-forward usage events to EventBus when one is configured
         if (this.options.eventBus) {
           const bus = this.options.eventBus;
-          const sid = result.sessionId;
-          result.on('usage', (event: SquadSessionEvent) => {
+          const sid = session.sessionId;
+          session.on('usage', (event: SquadSessionEvent) => {
             const inputTokens = typeof event['inputTokens'] === 'number' ? event['inputTokens'] : 0;
             const outputTokens = typeof event['outputTokens'] === 'number' ? event['outputTokens'] : 0;
             const model = typeof event['model'] === 'string' ? event['model'] : 'unknown';
@@ -499,7 +592,7 @@ export class SquadClient {
           });
         }
 
-        return result;
+        return session;
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         if (msg.includes('onPermissionRequest')) {
@@ -545,9 +638,7 @@ export class SquadClient {
       }
 
       try {
-        // Cast config to handle SDK version differences in ResumeSessionConfig type
-        const session = await this.client.resumeSession(sessionId, config as Parameters<typeof this.client.resumeSession>[1]);
-        return new CopilotSessionAdapter(session);
+        return await this.client.resumeSession(sessionId, config);
       } catch (error) {
         if (this.shouldAttemptReconnect(error)) {
           await this.attemptReconnection();
@@ -680,11 +771,7 @@ export class SquadClient {
     }
 
     try {
-      const raw = await this.client.getStatus();
-      return {
-        version: raw.version,
-        protocolVersion: raw.protocolVersion,
-      };
+      return await this.client.getStatus();
     } catch (error) {
       if (this.shouldAttemptReconnect(error)) {
         await this.attemptReconnection();
@@ -703,14 +790,7 @@ export class SquadClient {
     }
 
     try {
-      const raw = await this.client.getAuthStatus();
-      return {
-        isAuthenticated: raw.isAuthenticated,
-        authType: raw.authType,
-        host: raw.host,
-        login: raw.login,
-        statusMessage: raw.statusMessage,
-      };
+      return await this.client.getAuthStatus();
     } catch (error) {
       if (this.shouldAttemptReconnect(error)) {
         await this.attemptReconnection();
@@ -729,16 +809,7 @@ export class SquadClient {
     }
 
     try {
-      const models = await this.client.listModels();
-      return models.map((m): SquadModelInfo => ({
-        id: m.id,
-        name: m.name,
-        capabilities: m.capabilities,
-        policy: m.policy,
-        billing: m.billing,
-        supportedReasoningEfforts: m.supportedReasoningEfforts,
-        defaultReasoningEffort: m.defaultReasoningEffort,
-      }));
+      return await this.client.listModels();
     } catch (error) {
       if (this.shouldAttemptReconnect(error)) {
         await this.attemptReconnection();
@@ -929,17 +1000,17 @@ export class SquadClient {
     eventTypeOrHandler: SquadClientEventType | SquadClientEventHandler,
     handler?: (event: SquadClientEvent) => void
   ): () => void {
-    if (typeof eventTypeOrHandler === "string" && handler) {
-      return this.client.on(eventTypeOrHandler, handler);
-    } else {
-      return this.client.on(eventTypeOrHandler as SquadClientEventHandler);
-    }
+    return this.client.on(eventTypeOrHandler, handler);
   }
 
   /**
    * Determine if an error is recoverable via reconnection.
    */
   private shouldAttemptReconnect(error: unknown): boolean {
+    if (this.options.agentSdk !== 'copilot') {
+      return false;
+    }
+
     if (!this.options.autoReconnect) {
       return false;
     }

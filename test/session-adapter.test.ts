@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 
 /**
  * Tests for CopilotSessionAdapter — the runtime bridge between
@@ -43,21 +43,55 @@ function createMockCopilotSession(sessionId = 'test-session-42') {
   };
 }
 
-// We test the adapter indirectly by importing SquadClient and stubbing internals.
-// The adapter is constructed inside createSession(), so we mock the CopilotClient.
+vi.mock('@github/copilot-sdk', () => {
+  return {
+    CopilotClient: vi.fn().mockImplementation(() => {
+      return {
+        start: vi.fn().mockResolvedValue(undefined),
+        stop: vi.fn().mockResolvedValue([]),
+        forceStop: vi.fn().mockResolvedValue(undefined),
+        createSession: vi.fn(),
+        resumeSession: vi.fn(),
+        listSessions: vi.fn().mockResolvedValue([]),
+        deleteSession: vi.fn().mockResolvedValue(undefined),
+        getLastSessionId: vi.fn().mockResolvedValue(undefined),
+        ping: vi.fn().mockResolvedValue({ message: 'pong', timestamp: Date.now() }),
+        getStatus: vi.fn().mockResolvedValue({ version: '1.0.0', protocolVersion: 2 }),
+        getAuthStatus: vi.fn().mockResolvedValue({ isAuthenticated: true }),
+        listModels: vi.fn().mockResolvedValue([]),
+        on: vi.fn().mockReturnValue(() => {}),
+      };
+    }),
+  };
+});
+
+// We test the adapter indirectly by importing SquadClient and mocking CopilotClient.
 import { SquadClient } from '@bradygaster/squad-sdk/client';
+import { CopilotClient } from '@github/copilot-sdk';
+
+function getMockCopilotClientInstance() {
+  const MockedCopilotClient = CopilotClient as unknown as ReturnType<typeof vi.fn>;
+  const instance = MockedCopilotClient.mock.results.at(-1)?.value;
+  if (!instance) {
+    throw new Error('Expected mocked CopilotClient instance to exist');
+  }
+  return instance;
+}
 
 describe('CopilotSessionAdapter (via SquadClient)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   /** Helper: create a SquadClient wired to our mock */
   async function createAdaptedSession() {
     const client = new SquadClient({ autoStart: false });
+    const mockClient = getMockCopilotClientInstance();
+    const mockSession = createMockCopilotSession();
+    mockClient.createSession.mockResolvedValue(mockSession);
 
     // Force connected state
     (client as any).state = 'connected';
-
-    // Inject mock CopilotSession via the inner CopilotClient
-    const mockSession = createMockCopilotSession();
-    (client as any).client.createSession = vi.fn().mockResolvedValue(mockSession);
 
     const session = await client.createSession();
     return { session, mockSession };
@@ -281,13 +315,17 @@ describe('CopilotSessionAdapter (via SquadClient)', () => {
 });
 
 describe('CopilotSessionAdapter via resumeSession', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it('resumeSession also wraps in adapter', async () => {
     const client = new SquadClient({ autoStart: false });
-    (client as any).state = 'connected';
-
+    const mockClient = getMockCopilotClientInstance();
     const mockSession = createMockCopilotSession('resumed-session-99');
-    (client as any).client.resumeSession = vi.fn().mockResolvedValue(mockSession);
+    mockClient.resumeSession.mockResolvedValue(mockSession);
 
+    (client as any).state = 'connected';
     const session = await client.resumeSession('resumed-session-99');
 
     expect(session.sessionId).toBe('resumed-session-99');
@@ -297,11 +335,16 @@ describe('CopilotSessionAdapter via resumeSession', () => {
 });
 
 describe('CopilotSessionAdapter optional methods', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   async function createAdaptedSession() {
     const client = new SquadClient({ autoStart: false });
-    (client as any).state = 'connected';
+    const mockClient = getMockCopilotClientInstance();
     const mockSession = createMockCopilotSession();
-    (client as any).client.createSession = vi.fn().mockResolvedValue(mockSession);
+    mockClient.createSession.mockResolvedValue(mockSession);
+    (client as any).state = 'connected';
     const session = await client.createSession();
     return { session, mockSession };
   }

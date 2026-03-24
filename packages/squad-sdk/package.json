@@ -185,6 +185,7 @@
   },
   "dependencies": {
     "@github/copilot-sdk": "^0.1.32",
+    "@openai/codex-sdk": "^0.116.0",
     "vscode-jsonrpc": "^8.2.1"
   },
   "optionalDependencies": {

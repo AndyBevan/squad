@@ -141,6 +141,10 @@ export async function withGhostRetry(
   return '';
 }
 
+function resolveShellAgentSdk(): 'copilot' | 'codex' {
+  return process.env['SQUAD_AGENT_SDK'] === 'codex' ? 'codex' : 'copilot';
+}
+
 export async function runShell(): Promise<void> {
   // First-run check: before requiring a TTY, detect if no .squad/ exists locally.
   // In that case, output a plain-text welcome and init hint so non-interactive
@@ -241,7 +245,10 @@ export async function runShell(): Promise<void> {
   }
 
   // Create SDK client (auto-connects on first session creation)
-  const client = new SquadClient({ cwd: teamRoot });
+  const client = new SquadClient({
+    cwd: teamRoot,
+    agentSdk: resolveShellAgentSdk(),
+  });
 
   let shellApi: ShellApi | undefined;
   let origAddMessage: ((msg: ShellMessage) => void) | undefined;

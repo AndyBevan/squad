@@ -105,9 +105,29 @@ const lazyRunShell = () => import('./cli/shell/index.js');
 
 // Use local version resolver instead of importing VERSION from squad-sdk
 const VERSION = getPackageVersion();
+const AGENT_SDKS = new Set(['copilot', 'codex']);
+
+function resolveAgentSdk(rawAgentSdk?: string): 'copilot' | 'codex' {
+  if (rawAgentSdk === 'codex') {
+    return 'codex';
+  }
+
+  return 'copilot';
+}
 
 async function main(): Promise<void> {
-  const args = process.argv.slice(2);
+  const rawArgs = process.argv.slice(2);
+  const agentSdkIdx = rawArgs.indexOf('--agent-sdk');
+  const agentSdk = agentSdkIdx !== -1 ? rawArgs[agentSdkIdx + 1] : undefined;
+  if (agentSdk !== undefined) {
+    if (!AGENT_SDKS.has(agentSdk)) {
+      fatal(`Invalid agent SDK: ${agentSdk}. Use "copilot" or "codex".`);
+    }
+    process.env['SQUAD_AGENT_SDK'] = resolveAgentSdk(agentSdk);
+  }
+  const args = agentSdkIdx === -1
+    ? rawArgs
+    : rawArgs.filter((arg, idx) => idx !== agentSdkIdx && idx !== agentSdkIdx + 1);
   const hasGlobal = args.includes('--global');
   // --economy activates economy mode for this session (sets env var for spawner)
   const hasEconomy = args.includes('--economy');
@@ -216,6 +236,7 @@ async function main(): Promise<void> {
     console.log(`  ${BOLD}--help, -h${RESET}     Show help`);
     console.log(`  ${BOLD}--global${RESET}       Use personal (global) squad path (for init, upgrade)`);
     console.log(`  ${BOLD}--economy${RESET}      Activate economy mode for this session (cheaper models)`);
+    console.log(`  ${BOLD}--agent-sdk${RESET}     Select agent SDK: copilot | codex`);
     console.log(`\nInstallation:`);
     console.log(`  npm install --save-dev @bradygaster/squad-cli`);
     console.log(`\nInsider channel:`);
@@ -240,6 +261,12 @@ async function main(): Promise<void> {
   }
 
   // Route subcommands
+  const selectedAgentSdk = resolveAgentSdk(process.env['SQUAD_AGENT_SDK']);
+  const copilotOnlyCommands = new Set(['copilot', 'start', 'rc', 'remote-control', 'copilot-bridge']);
+  if (selectedAgentSdk === 'codex' && copilotOnlyCommands.has(cmd)) {
+    fatal(`Command "${cmd}" is only available with the Copilot agent SDK. Run without --agent-sdk codex or use core shell/session flows instead.`);
+  }
+
   if (cmd === 'init') {
     const modeIdx = args.indexOf('--mode');
     const mode = (modeIdx !== -1 && args[modeIdx + 1]) ? args[modeIdx + 1] : undefined;
